@@ -318,12 +318,16 @@ def create_default_config() -> DBStyleConfigJSON:
 
 
 def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
-	"""Load config.json or create fresh one if old format detected."""
+	"""Load a recognized config, or create one only when the path is absent.
+
+	Existing unrecognized or malformed files are preserved for manual recovery.
+	"""
 	if not config_path.exists():
 		# Create fresh config with defaults
 		config_path.parent.mkdir(parents=True, exist_ok=True)
 		new_config = create_default_config()
-		with open(config_path, 'w') as f:
+		# Exclusive creation avoids overwriting a file created after the existence check.
+		with open(config_path, 'x') as f:
 			json.dump(new_config.model_dump(), f, indent=2)
 		return new_config
 
@@ -340,16 +344,9 @@ def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
 				# Already in new format
 				return DBStyleConfigJSON(**data)
 
-		# Old format detected - delete it and create fresh config
-		logger.debug(f'Old config format detected at {config_path}, creating fresh config')
-		new_config = create_default_config()
-
-		# Overwrite with new config
-		with open(config_path, 'w') as f:
-			json.dump(new_config.model_dump(), f, indent=2)
-
-		logger.debug(f'Created fresh config.json at {config_path}')
-		return new_config
+		# Unknown or legacy formats cannot be safely migrated without a known schema.
+		# Do not replace an existing file with a default profile that drops restrictions.
+		raise ValueError(f'Unrecognized config format at {config_path}; existing file was not modified')
 
 	except Exception as e:
 		logger.error(f'Failed to load config from {config_path}: {e}; preserving the existing file')

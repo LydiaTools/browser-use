@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,63 @@ class TestConfigFileLoading:
 			load_and_migrate_config(config_path)
 
 		assert config_path.read_text(encoding='utf-8') == config_contents
+
+	@pytest.mark.parametrize(
+		'config_data',
+		[
+			{'browser_profile': {'default': {'allowed_domains': ['example.com']}}, 'llm': {}, 'agent': {}},
+			{'browser_profile': {'default': {'allowed_domains': ['example.com']}}},
+			{'browser_profile': {}, 'llm': {}, 'agent': {}},
+			{'legacy': {'allowed_domains': ['example.com']}},
+			[],
+		],
+	)
+	def test_unrecognized_config_never_overwrites_existing_file(self, tmp_path, config_data):
+		config_path = tmp_path / 'config.json'
+		contents = json.dumps(config_data)
+		config_path.write_text(contents, encoding='utf-8')
+
+		with pytest.raises((ValueError, TypeError)):
+			load_and_migrate_config(config_path)
+
+		assert config_path.read_text(encoding='utf-8') == contents
+
+	def test_valid_config_is_read_without_modification(self, tmp_path):
+		config_path = tmp_path / 'config.json'
+		contents = json.dumps(
+			{
+				'browser_profile': {'profile-1': {'id': 'profile-1', 'allowed_domains': ['example.com']}},
+				'llm': {},
+				'agent': {},
+			}
+		)
+		config_path.write_text(contents, encoding='utf-8')
+
+		result = load_and_migrate_config(config_path)
+
+		assert result.browser_profile['profile-1'].allowed_domains == ['example.com']
+		assert config_path.read_text(encoding='utf-8') == contents
+
+	def test_missing_config_is_created(self, tmp_path):
+		config_path = tmp_path / 'new' / 'config.json'
+		result = load_and_migrate_config(config_path)
+		assert config_path.is_file()
+		assert result.browser_profile
+		assert json.loads(config_path.read_text(encoding='utf-8'))['browser_profile']
+
+	def test_file_created_after_existence_check_is_not_overwritten(self, tmp_path, monkeypatch):
+		config_path = tmp_path / 'config.json'
+		contents = '{"created": "by another process"}'
+		config_path.write_text(contents, encoding='utf-8')
+		original_exists = Path.exists
+
+		def stale_exists(path):
+			return False if path == config_path else original_exists(path)
+
+		monkeypatch.setattr(Path, 'exists', stale_exists)
+		with pytest.raises(FileExistsError):
+			load_and_migrate_config(config_path)
+		assert config_path.read_text(encoding='utf-8') == contents
 
 
 class TestLazyConfig:
