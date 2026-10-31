@@ -2,11 +2,10 @@
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 
-from browser_use.config import CONFIG, load_and_migrate_config
+from browser_use.config import CONFIG, create_default_config, load_and_migrate_config
 
 
 class TestConfigFileLoading:
@@ -38,7 +37,7 @@ class TestConfigFileLoading:
 		contents = json.dumps(config_data)
 		config_path.write_text(contents, encoding='utf-8')
 
-		with pytest.raises((ValueError, TypeError)):
+		with pytest.raises(ValueError):
 			load_and_migrate_config(config_path)
 
 		assert config_path.read_text(encoding='utf-8') == contents
@@ -66,19 +65,61 @@ class TestConfigFileLoading:
 		assert result.browser_profile
 		assert json.loads(config_path.read_text(encoding='utf-8'))['browser_profile']
 
-	def test_file_created_after_existence_check_is_not_overwritten(self, tmp_path, monkeypatch):
+	def test_concurrent_creation_loads_winner_without_overwriting(self, tmp_path, monkeypatch):
+		config_path = tmp_path / 'config.json'
+		winner = create_default_config()
+		contents = json.dumps(winner.model_dump())
+		original_link = os.link
+
+		def competing_link(source, target):
+			config_path.write_text(contents, encoding='utf-8')
+			return original_link(source, target)
+
+		monkeypatch.setattr(os, 'link', competing_link)
+		result = load_and_migrate_config(config_path)
+		assert result == winner
+		assert config_path.read_text(encoding='utf-8') == contents
+		assert list(tmp_path.iterdir()) == [config_path]
+
+	def test_concurrent_invalid_file_is_preserved(self, tmp_path, monkeypatch):
 		config_path = tmp_path / 'config.json'
 		contents = '{"created": "by another process"}'
-		config_path.write_text(contents, encoding='utf-8')
-		original_exists = Path.exists
+		original_link = os.link
 
-		def stale_exists(path):
-			return False if path == config_path else original_exists(path)
+		def competing_link(source, target):
+			config_path.write_text(contents, encoding='utf-8')
+			return original_link(source, target)
 
-		monkeypatch.setattr(Path, 'exists', stale_exists)
-		with pytest.raises(FileExistsError):
+		monkeypatch.setattr(os, 'link', competing_link)
+		with pytest.raises(ValueError):
 			load_and_migrate_config(config_path)
 		assert config_path.read_text(encoding='utf-8') == contents
+		assert list(tmp_path.iterdir()) == [config_path]
+
+	def test_incomplete_default_is_never_published(self, tmp_path, monkeypatch):
+		config_path = tmp_path / 'config.json'
+
+		def failed_dump(*args, **kwargs):
+			args[1].write('{"partial":')
+			raise OSError('simulated write failure')
+
+		monkeypatch.setattr(json, 'dump', failed_dump)
+		with pytest.raises(OSError, match='simulated write failure'):
+			load_and_migrate_config(config_path)
+		assert not config_path.exists()
+		assert list(tmp_path.iterdir()) == []
+
+	def test_link_failure_cleans_up_without_creating_config(self, tmp_path, monkeypatch):
+		config_path = tmp_path / 'config.json'
+
+		def failed_link(*args, **kwargs):
+			raise OSError('simulated unsupported link')
+
+		monkeypatch.setattr(os, 'link', failed_link)
+		with pytest.raises(OSError, match='simulated unsupported link'):
+			load_and_migrate_config(config_path)
+		assert not config_path.exists()
+		assert list(tmp_path.iterdir()) == []
 
 
 class TestLazyConfig:

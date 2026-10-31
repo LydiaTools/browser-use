@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from functools import cache
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 from uuid import uuid4
 
@@ -326,10 +327,23 @@ def load_and_migrate_config(config_path: Path) -> DBStyleConfigJSON:
 		# Create fresh config with defaults
 		config_path.parent.mkdir(parents=True, exist_ok=True)
 		new_config = create_default_config()
-		# Exclusive creation avoids overwriting a file created after the existence check.
-		with open(config_path, 'x') as f:
-			json.dump(new_config.model_dump(), f, indent=2)
-		return new_config
+		# Write before publishing so a failed or interrupted write cannot expose an
+		# incomplete config. The exclusive link never replaces a concurrent winner.
+		temp_path = None
+		try:
+			with NamedTemporaryFile(mode='w', encoding='utf-8', dir=config_path.parent, prefix='.config-', delete=False) as f:
+				temp_path = Path(f.name)
+				json.dump(new_config.model_dump(), f, indent=2)
+			try:
+				os.link(temp_path, config_path)
+			except FileExistsError:
+				# Another process created the path: validate its file below.
+				pass
+			else:
+				return new_config
+		finally:
+			if temp_path is not None:
+				temp_path.unlink(missing_ok=True)
 
 	try:
 		with open(config_path) as f:
